@@ -1,0 +1,4 @@
+include ':currency-sdk'
+include ':currency-formatter'
+include ':currency-converter'
+rootProject.name = "currency-utilities"
