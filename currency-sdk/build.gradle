@@ -2,6 +2,8 @@ plugins {
     id 'com.android.library'
     id 'kotlin-android'
     id 'maven-publish'
+    id 'signing'
+    id("org.jetbrains.dokka") version "1.6.10"
 }
 
 android {
@@ -50,6 +52,20 @@ dependencies {
     fullImplementation project(":currency-formatter")
 }
 
+File secretPropsFile = project.rootProject.file('local.properties')
+if (secretPropsFile.exists()) {
+    Properties p = new Properties()
+    p.load(new FileInputStream(secretPropsFile))
+    p.each { name, value ->
+        ext[name] = value
+    }
+} else {
+    ext["signing.keyId"] = System.getenv('SIGNING_KEY_ID')
+    ext["signing.password"] = System.getenv('SIGNING_PASSWORD')
+    ext["signing.secretKeyRingFile"] = System.getenv('SIGNING_SECRET_KEY_RING_FILE')
+    ext["ossrhUsername"] = System.getenv('OSSRH_USERNAME')
+    ext["ossrhPassword"] = System.getenv('OSSRH_PASSWORD')
+}
 
 def addDependency(dependency, dependenciesNode) { //finish with dependencies
     if (dependency.group != null && dependency.name != null) {
@@ -73,24 +89,105 @@ def addDependency(dependency, dependenciesNode) { //finish with dependencies
     }
 }
 
-afterEvaluate {
-    android.productFlavors.all { productFlavor ->
-        publishing.publications.create("${productFlavor.name}Aar", MavenPublication) {
-            groupId 'com.example'
-            artifactId "currency-utilities-${productFlavor.name}"
-            version productFlavor.versionName
-            artifact tasks.findByName("bundle${productFlavor.name.capitalize()}ReleaseAar")
-
-            pom.withXml {
-                def dependenciesNode = asNode().appendNode('dependencies')
-                configurations.implementation.allDependencies.withType(ModuleDependency).each {
-                    println "implementation dependency: $it.group $it.name"
-                    addDependency(it, dependenciesNode)
-                }
-                configurations.getByName(productFlavor.name + "Implementation").allDependencies.withType(ModuleDependency).each {
-                    addDependency(it, dependenciesNode)
+Task createDokkaSourceSetsConfigTask(flavorName) {
+    task "configure${flavorName.capitalize()}SourceSets" {
+        doLast {
+            dokkaJavadoc.configure {
+                dokkaSourceSets {
+                    android.productFlavors.all { productFlavor ->
+                        named(productFlavor.name) {
+                            noAndroidSdkLink.set(false)
+                            suppress.set(productFlavor.name != flavorName)
+                        }
+                    }
                 }
             }
         }
     }
+}
+
+android.libraryVariants.all { variant ->
+    if (variant.buildType.name == "release") {
+        def flavorName = variant.flavorName
+        println "Variant name: " + variant.name + " flavor name: " + flavorName
+
+        task "generate${flavorName.capitalize()}SourcesJar"(type: Jar) {
+            archiveClassifier.set('sources')
+            from android.sourceSets.main.java.srcDirs, android.sourceSets[flavorName].java.srcDirs
+        }
+        def configureSourceSets = createDokkaSourceSetsConfigTask(flavorName)
+
+        tasks.register("generate${flavorName.capitalize()}JavadocJar", Jar) {
+            dependsOn(configureSourceSets)
+            dependsOn(tasks.dokkaJavadoc)
+            tasks.dokkaJavadoc.mustRunAfter configureSourceSets
+            group = 'jar'
+            archiveClassifier.set('javadoc')
+            from tasks.dokkaJavadoc.outputDirectory
+        }
+
+        publishing.publications.create("${flavorName}Aar", MavenPublication) {
+            groupId PUBLISH_GROUP_ID
+            artifactId "currency-utilities-$flavorName"
+            version variant.getMergedFlavor().versionName
+            artifact tasks.findByName("generate${flavorName.capitalize()}SourcesJar")
+            artifact tasks.findByName("generate${flavorName.capitalize()}JavadocJar")
+            artifact tasks.findByName("bundle${flavorName.capitalize()}ReleaseAar")
+
+            pom {
+                name = "currency-utilities-$flavorName"
+                description = 'The Android Gamedock SDK'
+                url = 'http://www.example.com/currency-utilities'
+                licenses {
+                    license {
+                        name = 'The Apache Software License, Version 2.0'
+                        url = 'http://www.apache.org/licenses/LICENSE-2.0.txt'
+                    }
+                }
+                developers {
+                    developer {
+                        id = 'zakir01913'
+                        name = 'Zakir Hossain'
+                        email = 'zakir01913@gmail.com'
+                    }
+                }
+                scm {
+                    connection = 'scm:git:github.com/zakir01913/currency-utilities.git'
+                    developerConnection = 'scm:git:ssh://github.com/zakir01913/currency-utilities.git'
+                    url = 'https://github.com/zakir01913/currency-utilities'
+                }
+                withXml {
+                    def dependenciesNode = asNode().appendNode('dependencies')
+                    configurations.implementation.allDependencies.withType(ModuleDependency).each {
+                        println "implementation dependency: $it.group $it.name"
+                        addDependency(it, dependenciesNode)
+                    }
+                    configurations.getByName(flavorName + "Implementation").allDependencies.withType(ModuleDependency).each {
+                        addDependency(it, dependenciesNode)
+                    }
+                }
+            }
+        }
+    }
+}
+
+publishing {
+    repositories {
+        maven {
+            name = "sonatype"
+
+            def releasesRepoUrl = "https://s01.oss.sonatype.org/service/local/staging/deploy/maven2/"
+            def snapshotsRepoUrl = "https://s01.oss.sonatype.org/content/repositories/snapshots/"
+            url = version.endsWith('SNAPSHOT') ? snapshotsRepoUrl : releasesRepoUrl
+
+            credentials {
+                username ossrhUsername
+                password ossrhPassword
+            }
+        }
+    }
+}
+
+signing {
+    sign publishing.publications
 }
